@@ -30,12 +30,12 @@ def main():
             for draw in game:
                 for color, amount in draw.items():
                     if color in actual_bag and actual_bag[color] < amount:
-                        print(f"Game {i + 1} is invalid")
+                        # print(f"Game {i + 1} is invalid")
                         valid = False
                         break
 
             if valid:
-                print(f"Game {i + 1} is valid")
+                # print(f"Game {i + 1} is valid")
                 sum_valid += i + 1
 
         print(f"Part 1: Sum of valid games: {sum_valid}")
@@ -50,12 +50,10 @@ def main():
 
             games_min_cubes.append(current_min_cubes)
 
-        print(games_min_cubes)
-
         games_power = []
         for min_cube in games_min_cubes:
             current_power = 1
-            
+
             for color, amount in min_cube.items():
                 current_power *= amount
 
