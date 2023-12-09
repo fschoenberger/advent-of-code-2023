@@ -1,65 +1,115 @@
 import os
-import time
 import re
-import gc
-from typing import Iterable
-from itertools import chain, zip_longest
-from functools import partial, reduce, lru_cache
-from multiprocessing import Pool
-from sortedcontainers import SortedDict
-import tqdm
 import bisect
-import cProfile
-
+from functools import reduce
 
 def parse_map(description: list[str]) -> list[tuple[int, int, int]]:
-    ret = []  # SortedDict()
+    ret = []
     for line in description:
         (destination_index, source_index, extent) = line.split(" ")
-        ret.append((int(source_index), int(destination_index), int(extent)))
+        ret.append((int(source_index), int(extent), int(destination_index)))
 
     ret.sort(key=lambda x: x[0])
 
     return ret
 
 
-# Returns the index and the index one can skip to
-def find_next_index(map: list[tuple[int, int, int]], needle: int) -> tuple[int, int]:
-    index = bisect.bisect(map, needle, key=lambda x: x[0]) - 1
+def make_intervals_explicit(
+    mapping: list[tuple[int, int, int]]
+) -> list[tuple[int, int]]:
+    ret = []
 
-    if index < 0:
-        return needle, needle + 1  # TODO: Make skip value better
+    for i, (start, length, destination) in enumerate(mapping):
+        ret.append((start, destination))
 
-    source, destination, extent = map[index]
+        # If the next interval is not directly adjacent, we have to insert a new one
+        # Do this for the last interval in any case
+        if (i != len(mapping) - 1 and mapping[i + 1][0] != start + length) or (
+            i == len(mapping) - 1
+        ):
+            ret.append((start + length, start + length))
 
-    if needle < source:
-        print(
-            f"needle = {needle}, source = {source}, list = {map[index -2 : index +2]}"
+    # Add a starting interval if mapping didn't start with 0
+    if ret[0][0] != 0:
+        ret.insert(0, (0, 0))
+
+    return merge_intervals(ret)
+
+
+def merge_intervals(l: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    ret = l
+
+    i = 1
+    # Merge intervals if possible
+    while i < len(ret) - 2:
+        start, start_value = ret[i]
+        end, end_value = ret[i + 1]
+
+        if start_value + (end - start) == end_value:
+            del ret[i + 1]
+        i += 1
+    return ret
+
+
+def get_intersected_intervals(
+    start: int, end: int | None, mapping: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    ret = [
+        value
+        for value in mapping
+        if start <= value[0] and (end is None or end >= value[0])
+    ]
+
+    if len(ret) == 0 or ret[0][0] > start:
+        # No fucking idea why
+        start_index = bisect.bisect_left(mapping, (start,)) - 1
+        assert start_index >= 0
+
+        x, f_x = mapping[start_index]
+
+        ret.insert(0, (start, f_x + (start - x)))
+
+    assert len(ret) > 0
+
+    # print(ret)
+    return ret
+
+
+def compose(
+    f: list[tuple[int, int]], g: list[tuple[int, int]]
+) -> list[tuple[int, int]]:
+    ret = []
+
+    # print(f"f: {f}")
+    # print(f"g: {g}")
+    for (x_start, f_start), (x_end, _) in zip(f, f[1:]):
+        length = x_end - x_start
+
+        ret.extend(
+            [
+                (start - (f_start - x_start), projection)
+                for start, projection in get_intersected_intervals(
+                    f_start, f_start + length, g
+                )
+            ]
         )
-        raise Exception("This should never happen")
 
-    # 622612797
-    # 226172555
-    if source < needle < source + extent:
-        return destination + (needle - source), source + 1 #extent - 1
+    f_start = f[-1][1]
+    ret.extend(
+        [
+            (start, projection)
+            for start, projection in get_intersected_intervals(f_start, None, g)
+        ]
+    )
 
-    return needle, needle + 1  # TODO: Make skip value better
+    # print(f"Ret: {ret}")
+    return ret
 
 
-def grouper(iterable, n, *, incomplete="fill", fillvalue=None):
-    "Collect data into non-overlapping fixed-length chunks or blocks"
-    # grouper('ABCDEFG', 3, fillvalue='x') --> ABC DEF Gxx
-    # grouper('ABCDEFG', 3, incomplete='strict') --> ABC DEF ValueError
-    # grouper('ABCDEFG', 3, incomplete='ignore') --> ABC DEF
-    args = [iter(iterable)] * n
-    if incomplete == "fill":
-        return zip_longest(*args, fillvalue=fillvalue)
-    if incomplete == "strict":
-        return zip(*args, strict=True)
-    if incomplete == "ignore":
-        return zip(*args)
-    else:
-        raise ValueError("Expected fill, strict, or ignore")
+def lookup(start: int, end: int, f):
+    values = [mapping for _, mapping in get_intersected_intervals(start, end, f)]
+
+    return min(values)
 
 
 def main():
@@ -68,95 +118,59 @@ def main():
 
         (
             seeds_string,
-            seed_to_soil,
-            soil_to_fertilizer,
-            fertilizer_to_water,
-            water_to_light,
-            light_to_temp,
-            temp_to_humidity,
-            humidity_to_location,
+            _seed_to_soil,
+            _soil_to_fertilizer,
+            _fertilizer_to_water,
+            _water_to_light,
+            _light_to_temp,
+            _temp_to_humidity,
+            _humidity_to_location,
         ) = content.split("\n\n")
 
         seeds = [int(seed) for seed in re.findall("\d+", seeds_string)]
 
-        seed_to_soil_map = parse_map(seed_to_soil.splitlines()[1:])
-        soil_to_fertilizer_map = parse_map(soil_to_fertilizer.splitlines()[1:])
-        fertilizer_to_water_map = parse_map(fertilizer_to_water.splitlines()[1:])
-        water_to_light_map = parse_map(water_to_light.splitlines()[1:])
-        light_to_temp_map = parse_map(light_to_temp.splitlines()[1:])
-        temp_to_humidity_map = parse_map(temp_to_humidity.splitlines()[1:])
-        humidity_to_location_map = parse_map(humidity_to_location.splitlines()[1:])
-
-        def get_lowest_index_candidates(map, indices_raw):
-            ret = []
-
-            indices = sorted(indices_raw)
-
-            cursor = 0
-            for index in indices:
-                if index < cursor:
-                    continue
-
-                candidate, skip_to = find_next_index(map, index)
-                ret.append(candidate)
-                cursor = skip_to
-            return ret
-
-        find_soil_candidates = partial(get_lowest_index_candidates, seed_to_soil_map)
-        find_fertilizer_candidates = partial(
-            get_lowest_index_candidates, soil_to_fertilizer_map
+        seed_to_soil_map = make_intervals_explicit(
+            parse_map(_seed_to_soil.splitlines()[1:])
         )
-        find_water_candidates = partial(
-            get_lowest_index_candidates, fertilizer_to_water_map
+        soil_to_fertilizer_map = make_intervals_explicit(
+            parse_map(_soil_to_fertilizer.splitlines()[1:])
         )
-        find_light_candidates = partial(get_lowest_index_candidates, water_to_light_map)
-        find_temp_candidates = partial(get_lowest_index_candidates, light_to_temp_map)
-        find_humidity_candidates = partial(
-            get_lowest_index_candidates, temp_to_humidity_map
+        fertilizer_to_water_map = make_intervals_explicit(
+            parse_map(_fertilizer_to_water.splitlines()[1:])
         )
-        find_location_candidates = partial(
-            get_lowest_index_candidates, humidity_to_location_map
+        water_to_light_map = make_intervals_explicit(
+            parse_map(_water_to_light.splitlines()[1:])
+        )
+        light_to_temp_map = make_intervals_explicit(
+            parse_map(_light_to_temp.splitlines()[1:])
+        )
+        temp_to_humidity_map = make_intervals_explicit(
+            parse_map(_temp_to_humidity.splitlines()[1:])
+        )
+        humidity_to_location_map = make_intervals_explicit(
+            parse_map(_humidity_to_location.splitlines()[1:])
         )
 
-        def get_lowest_value_for_seeds(seeds: Iterable) -> int:
-            return min(
-                reduce(
-                    lambda r, f: f(r),
-                    (
-                        find_soil_candidates,
-                        find_fertilizer_candidates,
-                        find_water_candidates,
-                        find_light_candidates,
-                        find_temp_candidates,
-                        find_humidity_candidates,
-                        find_location_candidates,
-                    ),
-                    seeds,
-                )
-            )
+        maps = [
+            seed_to_soil_map,
+            soil_to_fertilizer_map,
+            fertilizer_to_water_map,
+            water_to_light_map,
+            light_to_temp_map,
+            temp_to_humidity_map,
+            humidity_to_location_map,
+        ]
 
-        print(f"Part 1: Lowest location is {get_lowest_value_for_seeds(seeds)}")
+        total_map = reduce(compose, maps)
 
-        print("\n==================\n")
+        values = [lookup(seed, seed, total_map) for seed in seeds]
+        print(f"Part 1: {min(values)}")
 
-        seeds_part_2 = []
-        batch_size = 10_000_00
-        for start, extent in zip(seeds[::2], seeds[1::2]):
-            num_batches = extent // batch_size
-            print(f"[Doing {num_batches} batches]")
-
-            index = 1
-            for batch in tqdm.tqdm(
-                grouper(range(start, start + extent + 1), batch_size, fillvalue=None),
-                total=num_batches,
-            ):
-                # print(f"\nBatch {index} of {num_batches}:")
-                index += 1
-                seeds_part_2.append(get_lowest_value_for_seeds(batch))
-
-        print(len(seeds_part_2))
-
-        print(f"Part 2: Lowest location is {min(seeds_part_2)}")
+        values_part2 = [
+            lookup(start, start + length, total_map)
+            for start, length in zip(seeds[::2], seeds[1::2])
+        ]
+        print(f"Part 1: {min(values_part2)}")
 
 
 if __name__ == "__main__":
